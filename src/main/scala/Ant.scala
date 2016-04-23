@@ -1,4 +1,4 @@
-import akka.actor.{Actor, ActorLogging, ActorRef, Props}
+import akka.actor.{Actor, ActorRef, Props}
 
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.duration._
@@ -11,10 +11,15 @@ object Ant {
   def props(hive: ActorRef) = Props(new Ant(hive))
 }
 
-class Ant(hive: ActorRef) extends Actor with ActorLogging {
+class Ant(hive: ActorRef) extends Actor with Instrumented {
   import Ant._
 
   val t = context.system.scheduler
+
+  val name = self.path.toStringWithoutAddress
+  val status = metrics.gauge(s"$name-status")(self.path.toStringWithoutAddress)
+  val eaten = metrics.counter(s"$name-eaten")
+  val retries = metrics.counter(s"$name-retries")
 
   def forage() = t.scheduleOnce(2 seconds, self, Forage)
   def retry() = t.scheduleOnce(1 seconds, self, Retry)
@@ -22,14 +27,22 @@ class Ant(hive: ActorRef) extends Actor with ActorLogging {
 
   override def receive() = {
     case Forage => hive ! Hive.PutFood
+
     case Hive.PutFoodSuccess => forage()
+
     case Hive.PutFoodFailure => retry()
-    case Retry => hive ! Hive.PutFood
+
+    case Retry =>
+      retries += 1
+      hive ! Hive.PutFood
+
     case Eat => hive ! Hive.GetFood
-    case Hive.GetFoodSuccess => eat()
-    case Hive.GetFoodFailure =>
-      log.info(s"${self.path.name} has died")
-      context.system.stop(self)
+
+    case Hive.GetFoodSuccess =>
+      eaten += 1
+      eat()
+
+    case Hive.GetFoodFailure => context.system.stop(self)
   }
 
   forage()
